@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="tpdc-fetch — TPDC dataset search and download" width="100%">
+</p>
+
 # tpdc-fetch
 
 Unofficial CLI / agent skill for searching and downloading datasets from the
