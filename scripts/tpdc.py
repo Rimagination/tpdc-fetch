@@ -18,12 +18,17 @@ No third-party dependencies. Python 3.8+.
 from __future__ import annotations
 
 import argparse
+import base64
 import fnmatch
 import hashlib
 import json
 import os
 import posixpath
 import re
+import shutil
+import socket
+import struct
+import subprocess
 import sys
 import threading
 import time
@@ -35,13 +40,16 @@ from concurrent.futures import ThreadPoolExecutor
 from ftplib import FTP, error_perm, error_temp
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 BASE = "https://data.tpdc.ac.cn"
 UA = f"tpdc-fetch/{__version__} (+https://data.tpdc.ac.cn)"
 CACHE_DIR = Path(os.environ.get("TPDC_CACHE_DIR", Path.home() / ".tpdc-fetch"))
 CACHE_FILE = CACHE_DIR / "cache.json"
 FILES_TTL = 3600  # file-tree cache lifetime, seconds
+CRED_FILE = CACHE_DIR / "credentials.json"  # holds the access_token only
+PROFILE_DIR = CACHE_DIR / "browser-profile"  # dedicated Chromium profile for auth
+AUTH_PROBE_ID = "0e0a6819-7e18-4037-8893-dd165b23cde3"  # known policy-B dataset
 FTP_WORKER_CAP = 5  # TPDC allows at most 5 connections per IP
 
 
@@ -484,7 +492,8 @@ def probe_access(metadata_id, cookie=None, token=None, attempts=3, ftp_check=Fal
     login_class, reason, ftp_info = "NONE", "未探测", None
     no_ent_seen = 0
     tries = 0
-    for i in range(max(1, attempts) if (cookie or token) else 0):
+    # Skip the login probe when the no-login endpoint already granted access.
+    for i in range(max(1, attempts) if ((cookie or token) and not no_login_open) else 0):
         tries = i + 1
         _st, pl = http_json(
             BASE + "/file/ftp/getDownloadFtpUserByMetadataId?metadataId=" + urllib.parse.quote(metadata_id),
@@ -555,6 +564,325 @@ def print_access_verdict(v):
     emoji, _, _ = STATE_TEXT[v["state"]]
     print(f"结论: {emoji} {v['state_cn']}  [{v['state']}]  可下载: {'是' if v['can_download'] else '否'}")
     print(f"建议: {v['advice']}")
+
+
+# --------------------------------------------------------------------------- #
+# One-command login: launch a dedicated browser, grab the token, store it
+# --------------------------------------------------------------------------- #
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class _WS:
+    """Minimal RFC 6455 client — just enough to talk to the DevTools socket."""
+
+    def __init__(self, host, port, path, timeout=10):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = (
+            "GET " + path + " HTTP/1.1\r\nHost: " + host + ":" + str(port) + "\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(req.encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("WebSocket 握手失败")
+            resp += chunk
+        head = resp.split(b"\r\n\r\n", 1)[0]
+        if b" 101 " not in head.split(b"\r\n")[0]:
+            raise RuntimeError("WebSocket 握手被拒绝")
+        self.buf = resp.split(b"\r\n\r\n", 1)[1]
+
+    def _recv_exact(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("WebSocket 连接中断")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def send_text(self, text):
+        payload = text.encode("utf-8")
+        header = bytearray([0x81])
+        n = len(payload)
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack(">H", n)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack(">Q", n)
+        mask = os.urandom(4)
+        header += mask
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(bytes(header) + payload)
+
+    def recv_text(self):
+        while True:
+            b1, b2 = self._recv_exact(2)
+            opcode = b1 & 0x0F
+            n = b2 & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._recv_exact(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._recv_exact(8))[0]
+            if b2 & 0x80:
+                mask = self._recv_exact(4)
+                data = bytes(b ^ mask[i % 4] for i, b in enumerate(self._recv_exact(n)))
+            else:
+                data = self._recv_exact(n)
+            if opcode == 0x9:  # ping -> pong
+                self.send_text("")
+                continue
+            if opcode == 0x8:
+                raise RuntimeError("WebSocket 已被关闭")
+            if opcode in (0x1, 0x2):
+                return data.decode("utf-8", "replace")
+
+    def close(self):
+        try:
+            self.sock.sendall(bytes([0x88, 0x80]) + os.urandom(4))
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def _cdp_http(port, path):
+    with urllib.request.urlopen("http://127.0.0.1:" + str(port) + path, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def cdp_eval_js(port, expression, timeout=10):
+    """Evaluate JS in the data.tpdc.ac.cn page; None if no such target."""
+    targets = _cdp_http(port, "/json")
+    page = next(
+        (t for t in targets if t.get("type") == "page" and "data.tpdc.ac.cn" in (t.get("url") or "")),
+        None,
+    )
+    if not page or not page.get("webSocketDebuggerUrl"):
+        return None
+    ws_path = "/" + page["webSocketDebuggerUrl"].split("://", 1)[1].split("/", 1)[1]
+    ws = _WS("127.0.0.1", port, ws_path, timeout=timeout)
+    try:
+        ws.send_text(json.dumps({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {"expression": expression, "returnByValue": True},
+        }))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = json.loads(ws.recv_text())
+            if msg.get("id") == 1:
+                result = (msg.get("result") or {}).get("result") or {}
+                return result.get("value")
+        return None
+    finally:
+        ws.close()
+
+
+def find_chromium():
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    lad = os.environ.get("LocalAppData", "")
+    candidates = [
+        pf + r"\Google\Chrome\Application\chrome.exe",
+        pf86 + r"\Google\Chrome\Application\chrome.exe",
+        lad + r"\Google\Chrome\Application\chrome.exe",
+        pf + r"\Microsoft\Edge\Application\msedge.exe",
+        pf86 + r"\Microsoft\Edge\Application\msedge.exe",
+        lad + r"\Microsoft\Edge\Application\msedge.exe",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ]
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    return shutil.which("chrome") or shutil.which("chromium") or shutil.which("msedge")
+
+
+def ensure_browser(port, profile, url):
+    """Launch (or reuse) a dedicated-profile Chromium with a debug port."""
+    try:
+        _cdp_http(port, "/json/version")
+        return  # already running with this profile and port
+    except Exception:
+        pass
+    exe = find_chromium()
+    if not exe:
+        raise RuntimeError("未找到 Chrome/Edge；请安装，或改用 --token / --token-file 手动传入")
+    subprocess.Popen(
+        [exe, "--remote-debugging-port=" + str(port), "--user-data-dir=" + profile,
+         "--no-first-run", "--no-default-browser-check", "--window-size=1100,860", url],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(60):
+        time.sleep(0.4)
+        try:
+            _cdp_http(port, "/json/version")
+            return
+        except Exception:
+            continue
+    raise RuntimeError("浏览器调试端口未就绪")
+
+
+def wait_for_token(port, timeout=300):
+    expr = "localStorage.getItem('access_token')||''"
+    print("等待登录…（登录成功后会自动继续；Ctrl+C 放弃）", file=sys.stderr)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            val = cdp_eval_js(port, expr, timeout=8) or ""
+            if str(val).startswith("eyJ"):
+                return str(val)
+        except Exception:
+            pass
+        time.sleep(2)
+    raise RuntimeError("等待登录超时（" + str(timeout) + " 秒）")
+
+
+def load_saved_token():
+    try:
+        return (json.loads(CRED_FILE.read_text(encoding="utf-8")) or {}).get("access_token") or None
+    except Exception:
+        return None
+
+
+def save_token(token):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CRED_FILE.write_text(
+        json.dumps({
+            "access_token": token,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "note": "几小时有效的会话令牌；tpdc.py auth --logout 可清除",
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(CRED_FILE, 0o600)
+    except Exception:
+        pass
+
+
+def token_is_accepted(token):
+    """Any structured answer other than 用户未登录 proves the token authenticates."""
+    _st, pl = http_json(
+        BASE + "/file/ftp/getDownloadFtpUserByMetadataId?metadataId=" + AUTH_PROBE_ID,
+        "POST", {}, token=token,
+    )
+    cls, _reason, _info = classify_login_payload(pl)
+    return cls in ("ENTITLED", "NO_ENTITLEMENT")
+
+
+AUTH_PORT_FILE = CACHE_DIR / "auth_port.txt"
+
+
+def _remember_port(port):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        AUTH_PORT_FILE.write_text(str(port), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def ensure_auth_browser(url):
+    """Reuse the dedicated auth browser if it is alive; otherwise start one.
+
+    The debug port is remembered so later runs attach to the same,
+    already-logged-in instance instead of spawning duplicates.
+    """
+    remembered = []
+    try:
+        remembered.append(int(AUTH_PORT_FILE.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        pass
+    for port in remembered + list(range(9273, 9283)):
+        try:
+            _cdp_http(port, "/json/version")
+            _remember_port(port)
+            return port
+        except Exception:
+            continue
+    exe = find_chromium()
+    if not exe:
+        raise RuntimeError("未找到 Chrome/Edge；请安装，或改用 --token / --token-file 手动传入")
+    port = free_port()
+    subprocess.Popen(
+        [exe, "--remote-debugging-port=" + str(port), "--user-data-dir=" + str(PROFILE_DIR),
+         "--no-first-run", "--no-default-browser-check", "--window-size=1100,860", url],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(50):
+        time.sleep(0.4)
+        try:
+            _cdp_http(port, "/json/version")
+            _remember_port(port)
+            return port
+        except Exception:
+            continue
+    raise RuntimeError(
+        "浏览器调试端口未就绪；若之前由 tpdc.py 打开的浏览器窗口还在，请先关闭它再重试"
+    )
+
+
+def run_auth_flow(timeout=300):
+    port = ensure_auth_browser(BASE + "/home")
+    print("已在浏览器打开 TPDC；若未登录请登录，成功后这里会自动继续。", file=sys.stderr)
+    token = wait_for_token(port, timeout=timeout)
+    save_token(token)
+    accepted = token_is_accepted(token)
+    print("令牌已保存: " + str(CRED_FILE), file=sys.stderr)
+    print(
+        "有效性: 服务端认可 ✅" if accepted
+        else "有效性: 已保存（探针数据集未确认，但令牌已可随请求使用）",
+        file=sys.stderr,
+    )
+    return token
+
+
+def resolve_token(explicit=None):
+    """--token > --token-file (already merged) > env > saved credentials."""
+    if explicit:
+        return explicit
+    env = os.environ.get("TPDC_TOKEN")
+    if env:
+        return env
+    return load_saved_token()
+
+
+def cmd_auth(args):
+    if args.logout:
+        removed = []
+        if CRED_FILE.exists():
+            CRED_FILE.unlink()
+            removed.append("保存的令牌")
+        if args.purge and PROFILE_DIR.exists():
+            shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+            removed.append("浏览器登录配置")
+        print("已清除: " + ("、".join(removed) if removed else "（本来就没有）"))
+        return 0
+    if args.show:
+        token = load_saved_token()
+        if not token:
+            print("未保存令牌；运行 tpdc.py auth 获取。")
+            return 2
+        print("令牌: " + token[:10] + "…（已脱敏）  保存于 " + str(CRED_FILE))
+        print("有效性: " + ("服务端认可 ✅" if token_is_accepted(token) else "已过期或无效（重新运行 auth）"))
+        return 0
+    run_auth_flow(timeout=max(30, args.timeout))
+    print("之后 download / status / meta / cite 会自动使用它；过期时 download 会自动重开浏览器。")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -937,7 +1265,7 @@ def cmd_list(args):
 
 
 def cmd_info(args):
-    token = args.token or os.environ.get("TPDC_TOKEN")
+    token = resolve_token(args.token)
     rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     files = walk_files(args.metadata_id)
     if args.json:
@@ -981,7 +1309,7 @@ def cmd_files(args):
 
 
 def cmd_meta(args):
-    token = args.token or os.environ.get("TPDC_TOKEN")
+    token = resolve_token(args.token)
     rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     if not rec:
         print(
@@ -1032,7 +1360,7 @@ def write_progress_state(out_dir, title, files, status="下载中"):
 
 
 def cmd_download(args):
-    token = getattr(args, "token", None) or os.environ.get("TPDC_TOKEN")
+    token = resolve_token(getattr(args, "token", None))
     rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     out = Path(args.out)
     if args.metadata_only:
@@ -1055,6 +1383,15 @@ def cmd_download(args):
         verdict = probe_access(
             args.metadata_id, cookie, token, attempts=getattr(args, "attempts", 3) or 3
         )
+        if verdict["state"] == "AUTH_INVALID" and not getattr(args, "no_relogin", False):
+            print("令牌无效或过期，自动打开浏览器重新登录…（登录后自动继续）", file=sys.stderr)
+            try:
+                token = run_auth_flow(timeout=300)
+            except Exception as exc:
+                print(f"自动重新登录失败: {exc}", file=sys.stderr)
+                print_access_verdict(verdict)
+                return 2
+            verdict = probe_access(args.metadata_id, cookie, token, attempts=2)
         if verdict["state"] in ("NO_ENTITLEMENT", "AUTH_INVALID"):
             print_access_verdict(verdict)
             return 2
@@ -1064,7 +1401,14 @@ def cmd_download(args):
             info["access"] = "B"
         # OPEN / UNKNOWN_TRANSIENT / NO_ENTITLEMENT_ONCE: let get_ftp decide.
     if info is None:
-        info = get_ftp(args.metadata_id, cookie, token)
+        try:
+            info = get_ftp(args.metadata_id, cookie, token)
+        except RuntimeError as exc:
+            if getattr(args, "no_relogin", False) or "未提供凭据" not in str(exc):
+                raise
+            print("该数据集需要登录：自动打开浏览器…（登录后自动继续）", file=sys.stderr)
+            token = run_auth_flow(timeout=300)
+            info = get_ftp(args.metadata_id, cookie, token)
 
     files = walk_files(args.metadata_id, use_cache=not args.no_cache)
 
@@ -1182,7 +1526,7 @@ def cmd_verify(args):
 
 def cmd_status(args):
     cookie = args.cookie or os.environ.get("TPDC_COOKIE")
-    token = args.token or os.environ.get("TPDC_TOKEN")
+    token = resolve_token(args.token)
     v = probe_access(
         args.metadata_id,
         cookie,
@@ -1199,7 +1543,7 @@ def cmd_status(args):
 
 
 def cmd_cite(args):
-    token = args.token or os.environ.get("TPDC_TOKEN")
+    token = resolve_token(args.token)
     rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     if not rec:
         print(
@@ -1314,6 +1658,7 @@ def main():
     p.add_argument("--sha256", action="store_true", help="下载后计算 SHA256")
     p.add_argument("--no-cache", action="store_true", help="忽略 1 小时文件树缓存")
     p.add_argument("--no-probe", action="store_true", help="跳过下载前的权限预检")
+    p.add_argument("--no-relogin", action="store_true", help="凭据失效时不自动打开浏览器重登")
     p.add_argument("--no-progress", action="store_true")
     p.add_argument("--panel", action="store_true", help="启动本机实时面板（仅绑定 127.0.0.1）")
     p.add_argument("--panel-port", type=int, default=8765)
@@ -1335,6 +1680,13 @@ def main():
     )
     p.add_argument("--cookie-file", help="从文件读取 Cookie")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("auth", help="登录一次自动保存令牌；之后所有命令自动使用")
+    p.add_argument("--logout", action="store_true", help="清除保存的令牌")
+    p.add_argument("--purge", action="store_true", help="连同浏览器登录配置一起删除")
+    p.add_argument("--show", action="store_true", help="查看保存的令牌状态（脱敏）")
+    p.add_argument("--timeout", type=int, default=300, help="等待登录的秒数")
+    p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("verify", help="对照 manifest.json 校验已下载的文件")
     p.add_argument("dir", help="下载目录（含 manifest.json）")

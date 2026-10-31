@@ -15,6 +15,11 @@ v0.2.0 additions: `list` / `verify` commands, GB/T 7714 citations, online metada
 
 v0.2.1: Bearer token auth (`--token` / `TPDC_TOKEN`) for policy-B datasets, and access errors now surface the server's reason. `未查询到对应FTP账户` means the account is logged in but has no entitlement — the dataset needs a separate application; retrying or changing credentials will not help.
 
+v0.5.0: `auth` — one-command login. A dedicated-profile browser opens, the user
+logs in, the access_token is captured over CDP and stored locally
+(`~/.tpdc-fetch/credentials.json`); every command then uses it automatically,
+and `download` re-opens the browser by itself when the token expires.
+
 v0.4.0: `download --panel` local live dashboard (127.0.0.1 only) plus a standalone
 watcher (`scripts/progress_panel.py`); `--token-file` / `--cookie-file` keep
 secrets out of shell history; credentials are never written to disk.
@@ -145,15 +150,32 @@ The server binds to 127.0.0.1 only and serves the dashboard plus a
 `/progress` snapshot; it never serves file contents. The panel lives as
 long as the download process.
 
+## One-command login
+
+```bash
+python scripts/tpdc.py auth        # browser opens; log in; token is saved
+python scripts/tpdc.py auth --show     # masked status + server-side validity
+python scripts/tpdc.py auth --logout   # delete the saved token
+python scripts/tpdc.py auth --purge    # also delete the browser login profile
+```
+
+After `auth`, every command picks the token up automatically — no flags, no
+environment variables. When a token expires mid-`download`, the browser opens
+again by itself, the user logs in, and the download continues (`--no-relogin`
+disables this). The login itself happens on TPDC's own page: the tool never
+sees the password.
+
 ## Credentials and privacy
 
-* `--cookie` / `--token` (and `TPDC_COOKIE` / `TPDC_TOKEN`) are held in
-  memory for the process only — never written to disk, logs, manifest.json
-  or the panel.
-* Prefer `--token-file` / `--cookie-file` so secrets stay out of shell
-  history; values are read once and kept in memory.
+* `auth` stores **only the access_token** (a hours-lived session token, never
+  the password) in `~/.tpdc-fetch/credentials.json`; the login session lives
+  in a dedicated browser profile at `~/.tpdc-fetch/browser-profile`.
+* `--logout` / `--purge` remove them. Without running `auth`, nothing is
+  persisted: `--cookie` / `--token` / `--token-file` / `--cookie-file` are
+  held in memory for the process only.
+* Secrets never reach logs, `manifest.json`, the panel, or git.
 * `.tpdc_progress.json` contains dataset title, file names and sizes only.
-* The panel binds to 127.0.0.1; nothing is exposed to the network.
+* The panel and the auth browser bind to 127.0.0.1; nothing is network-exposed.
 
 ## Download options
 
