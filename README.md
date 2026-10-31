@@ -28,17 +28,27 @@ TPDC Fetch 是一个**可用于任意 AI Agent 的 Skill**——Claude Code、Co
 
 ## 开始使用
 
-```bash
-# Agent skill
-git clone https://github.com/Rimagination/tpdc-fetch.git ~/.zcode/skills/tpdc-fetch
+**一句话安装到 Agent：**
 
-# CLI（Python 3.8+，无第三方依赖）
+> 帮我安装这个skill：https://github.com/Rimagination/tpdc-fetch
+
+**查找数据：**
+
+> 使用tpdc-fetch检索一下有多少跟沙漠有关的数据集？
+
+**下载数据：**
+
+> 使用tpdc-fetch下载中国1:200万沙漠分布图（1974）
+
+也可以直接用命令行（Python 3.8+，无第三方依赖）：
+
+```bash
 python scripts/tpdc.py search "沙漠" --limit 10
 python scripts/tpdc.py meta <metadataId>
 python scripts/tpdc.py download <metadataId> --out ./data
 ```
 
-常用参数：`--workers 4`、`--include/--exclude`、`--metadata-only`、`--dry-run`。
+常用参数：`--workers 4`、`--include/--exclude`、`--metadata-only`、`--dry-run`、`--sha256`。
 
 ## 你会得到什么
 
