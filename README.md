@@ -40,6 +40,8 @@ TPDC Fetch 是一个**可用于任意 AI Agent 的 Skill**——Claude Code、Co
 
 > 使用tpdc-fetch下载中国1:200万沙漠分布图（1974）
 
+![下载完成：43 个文件、7.3 MB，附数据说明、manifest 与引用](./assets/desert-download-result.webp)
+
 **显示进度条：**
 
 > 显示tpdc-fetch下载任务实时面板
