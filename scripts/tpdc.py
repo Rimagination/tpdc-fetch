@@ -85,7 +85,7 @@ def human(n):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-def http_json(url, method="GET", body=None, cookie=None, timeout=40, retries=2):
+def http_json(url, method="GET", body=None, cookie=None, token=None, timeout=40, retries=2):
     headers = {"User-Agent": UA, "Accept": "application/json"}
     data = None
     if body is not None:
@@ -93,6 +93,8 @@ def http_json(url, method="GET", body=None, cookie=None, timeout=40, retries=2):
         headers["Content-Type"] = "application/json; charset=UTF-8"
     if cookie:
         headers["Cookie"] = cookie
+    if token:
+        headers["Authorization"] = "Bearer " + token
     last_exc = None
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -187,11 +189,11 @@ def find_record(obj):
     return None
 
 
-def fetch_record(metadata_id, cookie=None):
-    """Fetch a single record via detailOpen (works with a policy-B cookie)."""
+def fetch_record(metadata_id, cookie=None, token=None):
+    """Fetch a single record via detailOpen (works with a policy-B cookie or token)."""
     body = {"metadataId": metadata_id}
     status, payload = http_json(
-        BASE + "/view/metadataView/detailOpen", "POST", body, cookie=cookie
+        BASE + "/view/metadataView/detailOpen", "POST", body, cookie=cookie, token=token
     )
     if status == 200 and isinstance(payload, dict) and str(payload.get("code")) == "200":
         rec = find_record(payload.get("context"))
@@ -201,12 +203,12 @@ def fetch_record(metadata_id, cookie=None):
     return None
 
 
-def get_record(metadata_id, cookie=None):
+def get_record(metadata_id, cookie=None, token=None):
     """Cached record first; falls back to an online detailOpen fetch."""
     rec = load_cache().get(metadata_id)
     if rec and rec.get("description"):
         return rec
-    fetched = fetch_record(metadata_id, cookie)
+    fetched = fetch_record(metadata_id, cookie, token)
     if fetched:
         return fetched
     return rec or {}
@@ -325,29 +327,31 @@ def ftp_open(metadata_id):
     return None
 
 
-def ftp_login(metadata_id, cookie):
-    if not cookie:
+def ftp_login(metadata_id, cookie, token=None):
+    if not cookie and not token:
         return None
     url = BASE + "/file/ftp/getDownloadFtpUserByMetadataId?metadataId=" + urllib.parse.quote(metadata_id)
-    status, payload = http_json(url, "POST", {}, cookie=cookie)
+    status, payload = http_json(url, "POST", {}, cookie=cookie, token=token)
     if status == 200 and isinstance(payload, dict) and payload.get("code") == "200":
         return parse_ftp(payload.get("data") or {})
     return None
 
 
-def get_ftp(metadata_id, cookie=None):
+def get_ftp(metadata_id, cookie=None, token=None):
     info = ftp_open(metadata_id)
     if info and info.get("username"):
         info["access"] = "A"
         return info
-    info = ftp_login(metadata_id, cookie)
+    info = ftp_login(metadata_id, cookie, token)
     if info and info.get("username"):
         info["access"] = "B"
         return info
     raise RuntimeError(
         "该数据集不是开放数据，需要登录/申请。\n"
         f"  页面: {BASE}/zh-hans/data/{metadata_id}\n"
-        "  登录后把浏览器 Cookie 传给 --cookie（或设置 TPDC_COOKIE），再重试。"
+        "  登录后把浏览器 Cookie 传给 --cookie（或设置 TPDC_COOKIE），再重试；\n"
+        "  也可以传 Bearer 令牌：--token（或设置 TPDC_TOKEN），取自登录后\n"
+        "  浏览器 DevTools → Application → Local Storage → access_token。"
     )
 
 
@@ -797,7 +801,8 @@ def cmd_meta(args):
 
 
 def cmd_download(args):
-    rec = get_record(args.metadata_id, cookie=args.cookie)
+    token = getattr(args, "token", None) or os.environ.get("TPDC_TOKEN")
+    rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     out = Path(args.out)
     if args.metadata_only:
         if not rec:
@@ -814,7 +819,7 @@ def cmd_download(args):
     workers = min(max(1, args.workers), FTP_WORKER_CAP)
     # Resolve access before walking the tree: B/C datasets should fail fast
     # instead of recursing through a potentially huge file tree.
-    info = get_ftp(args.metadata_id, cookie)
+    info = get_ftp(args.metadata_id, cookie, token)
 
     files = walk_files(args.metadata_id, use_cache=not args.no_cache)
 
@@ -844,7 +849,7 @@ def cmd_download(args):
         return 0
 
     def refresh():
-        return get_ftp(args.metadata_id, cookie)
+        return get_ftp(args.metadata_id, cookie, token)
 
     results = download_files(
         info,
@@ -1023,6 +1028,7 @@ def main():
     p.add_argument("--seg-mb", type=int, default=32, help="大文件分段大小 MB")
     p.add_argument("--sock-timeout", type=int, default=30, help="FTP 数据 socket 超时秒数")
     p.add_argument("--cookie", help="浏览器 Cookie（B 类数据需要）")
+    p.add_argument("--token", help="Bearer 令牌（B 类数据可用；取自登录后的 access_token）")
     p.add_argument("--include", action="append", help="只下载匹配的文件，可多次")
     p.add_argument("--exclude", action="append", help="排除匹配的文件，可多次")
     p.add_argument("--dry-run", action="store_true", help="只列文件与 FTP 信息，不下载")

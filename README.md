@@ -23,7 +23,7 @@ TPDC Fetch 是一个面向[国家青藏高原科学数据中心](https://data.tp
 | 找数据 | “搜 TPDC 的沙漠分布数据” | 返回 ID、访问级别、作者、DOI |
 | 看说明 | “这个数据集的投影是什么？” | 读 `description`，原样输出，不猜 datum |
 | 下开放数据 | “把 `122c9ac2...` 下到 `./data`” | 免登录 FTP，分段、续传、进度条 |
-| 下登录数据 | “用我的 Cookie 下这个数据集” | `--cookie` 或 `TPDC_COOKIE` |
+| 下登录数据 | “用我的 Cookie 下这个数据集” | `--cookie` 或 `TPDC_COOKIE`；会话 Cookie 读不到时用 `--token` / `TPDC_TOKEN` |
 | 引用 | “给我这个数据集的 BibTeX” | `CITATION.txt` / BibTeX |
 
 ## 开始使用
@@ -71,7 +71,7 @@ python scripts/tpdc.py download <metadataId> --out ./data
 | 级别 | 含义 | 工具怎么做 |
 |---|---|---|
 | **A** | 开放，免登录 | 直接拿 FTP 账号下载 |
-| **B** | 需要登录 | 用浏览器 Cookie：`--cookie` 或 `TPDC_COOKIE` |
+| **B** | 需要登录 | 用浏览器 Cookie：`--cookie` 或 `TPDC_COOKIE`；Cookie 是 httpOnly 时改用 Bearer 令牌：`--token` 或 `TPDC_TOKEN` |
 | **C** | 需要申请 | 只给页面链接，不绕过申请 |
 
 ## 常见问题

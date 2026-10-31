@@ -82,7 +82,17 @@ export TPDC_COOKIE="SESSION=...; token=..."
 python scripts/tpdc.py download <metadataId> --out ./data
 ```
 
-If the API returns `用户未登录`, the cookie expired; copy a fresh one. The skill does not persist cookies.
+If the session cookie is `httpOnly` (browsers refuse to expose it to page scripts), use
+the Bearer token instead — DevTools → Application → Local Storage → `access_token`:
+
+```bash
+python scripts/tpdc.py download <metadataId> --out ./data --token "eyJ..."
+# or
+export TPDC_TOKEN="eyJ..."
+python scripts/tpdc.py download <metadataId> --out ./data
+```
+
+If the API returns `用户未登录`, the cookie/token expired; copy a fresh one. The skill does not persist credentials.
 
 ## Download options
 
