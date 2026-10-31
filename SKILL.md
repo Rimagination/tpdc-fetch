@@ -15,6 +15,34 @@ v0.2.0 additions: `list` / `verify` commands, GB/T 7714 citations, online metada
 
 v0.2.1: Bearer token auth (`--token` / `TPDC_TOKEN`) for policy-B datasets, and access errors now surface the server's reason. `未查询到对应FTP账户` means the account is logged in but has no entitlement — the dataset needs a separate application; retrying or changing credentials will not help.
 
+v0.3.0: `status <id>` probe — three-stage check (no-login FTP → login FTP → optional FTP `SIZE`) that resolves what the current account can actually download. `download` runs the same probe first and refuses early on conclusive denials.
+
+## Decide before you download
+
+The `sharePolicy` letter (A/B/C) is the site's door sign, **not** the permission. What decides is whether the server issues an FTP account for *this account + this dataset*. Probe with `status`:
+
+```bash
+python scripts/tpdc.py status <metadataId> --token "eyJ..."        # or --cookie / TPDC_TOKEN
+python scripts/tpdc.py status <metadataId> --token "eyJ..." --ftp-check --json
+```
+
+| state | meaning | what to do |
+|---|---|---|
+| `OPEN` | no-login endpoint grants FTP | download without credentials |
+| `ENTITLED` | login endpoint grants FTP | download with the same credentials |
+| `NO_ENTITLEMENT` | `未查询到对应FTP账户` seen twice | login is not enough; the dataset needs a separate application. Do not retry. |
+| `NO_ENTITLEMENT_ONCE` | seen once | inconclusive; rerun `status --attempts 3` |
+| `AUTH_INVALID` | `用户未登录` | refresh the token/cookie |
+| `NEEDS_AUTH` | probed without credentials | pass `--token` (localStorage `access_token`) or `--cookie` |
+| `UNKNOWN_TRANSIENT` | `code=500 / 操作失败` | server hiccup; retry later — **never** report this as "unavailable" |
+
+Rules for agents:
+
+1. Run `status` before `download` on any B/C dataset (download does it automatically; `--no-probe` skips).
+2. A single `操作失败` proves nothing. Retry with backoff before drawing conclusions.
+3. Report the state plus the server's own reason verbatim; never translate a transient error into "the data is unavailable".
+4. Verdicts are account-specific: the same dataset can be downloadable for one account and not another.
+
 ## Access model
 
 TPDC datasets carry a `sharePolicy`:

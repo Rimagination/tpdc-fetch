@@ -7,6 +7,8 @@ Supports:
   - open-data (sharePolicy A) no-login FTP download
   - login-assisted (sharePolicy B) FTP download via a browser cookie
   - resumable, segmented, multi-connection FTP download with a live progress bar
+  - access probe (`status`): resolves what the current account can actually
+    download, separating transient server errors from real denials
   - post-download verification against manifest.json
   - citations in BibTeX / RIS / GB/T 7714 / plain text
 
@@ -33,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ftplib import FTP, error_perm, error_temp
 from pathlib import Path
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 BASE = "https://data.tpdc.ac.cn"
 UA = f"tpdc-fetch/{__version__} (+https://data.tpdc.ac.cn)"
@@ -375,6 +377,184 @@ def get_ftp(metadata_id, cookie=None, token=None):
         f"{hint}"
         "  可用 `files <id>` 确认文件清单，用 `meta <id>` 读数据说明。"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Access probe: the sharePolicy letter is a door sign, entitlements are the lock
+# --------------------------------------------------------------------------- #
+NO_ENTITLEMENT_MARK = "未查询到对应FTP账户"
+
+STATE_TEXT = {
+    "OPEN": ("✅", "开放数据，可直接下载", "直接 download，无需任何凭据。"),
+    "ENTITLED": ("✅", "已授权，可下载", "带同一凭据 download 即可。"),
+    "NO_ENTITLEMENT": (
+        "❌",
+        "已登录但无权限",
+        "需要到数据集页面单独申请/获得授权；重试或换凭据都不会有用。",
+    ),
+    "NO_ENTITLEMENT_ONCE": (
+        "⚠️",
+        "疑似无权限（仅观测到一次）",
+        "用 --attempts 3 再跑一次 status 确认；单次结果不可下结论。",
+    ),
+    "AUTH_INVALID": ("🔑", "凭据无效或过期", "重新登录，取新的 access_token 或 Cookie。"),
+    "NEEDS_AUTH": (
+        "🔑",
+        "需要登录",
+        "传 --token（推荐，取自登录后 localStorage 的 access_token）或 --cookie。",
+    ),
+    "UNKNOWN_TRANSIENT": (
+        "⚠️",
+        "未知（服务端瞬时错误）",
+        "稍后重试；「操作失败」不等于无权限，不要据此下结论。",
+    ),
+}
+
+
+def classify_login_payload(payload):
+    """Classify a getDownloadFtpUserByMetadataId response.
+
+    Returns (cls, reason, ftp_info); cls ∈ ENTITLED / NO_ENTITLEMENT /
+    AUTH_INVALID / TRANSIENT / OTHER.
+    """
+    if not isinstance(payload, dict):
+        return "TRANSIENT", str(payload)[:160], None
+    code = str(payload.get("code"))
+    data = payload.get("data")
+    msg = payload.get("message") or ""
+    if code == "200" and isinstance(data, dict) and data.get("username"):
+        return "ENTITLED", "", parse_ftp(data)
+    text = data.strip() if isinstance(data, str) and data.strip() else (msg or "")
+    if NO_ENTITLEMENT_MARK in text:
+        return "NO_ENTITLEMENT", text, None
+    if "未登录" in text:
+        return "AUTH_INVALID", text, None
+    if code == "500":
+        return "TRANSIENT", text or "操作失败", None
+    return "OTHER", text or msg or f"code={code}", None
+
+
+def probe_ftp(info, metadata_id, timeout=60):
+    """Log in to FTP and SIZE one real file. Returns (result, detail)."""
+    ftp = None
+    try:
+        ftp = connect_ftp(info, ctl_timeout=timeout)
+    except Exception as exc:
+        text = str(exc)
+        if "421" in text:
+            return "HOST_FULL", text[:160]
+        return "ERROR", text[:160]
+    try:
+        entries = root_files(metadata_id)
+        names = [e.get("name") for e in entries if isinstance(e, dict) and e.get("name")]
+        if not names:
+            return "OK", "目录为空，无法 SIZE，但 FTP 登录成功"
+        size = ftp.size(names[0])
+        return "OK", f"SIZE {names[0]} = {human(size) if size else size}"
+    except error_perm as exc:
+        text = str(exc)
+        if "530" in text:
+            return "LOGIN_FAILED", text[:160]
+        return "ERROR", text[:160]
+    except Exception as exc:
+        return "ERROR", str(exc)[:160]
+    finally:
+        if ftp is not None:
+            try:
+                ftp.quit()
+            except Exception:
+                try:
+                    ftp.close()
+                except Exception:
+                    pass
+
+
+def probe_access(metadata_id, cookie=None, token=None, attempts=3, ftp_check=False):
+    """Resolve what this account can actually do with this dataset.
+
+    Never trust a single transient answer: `操作失败` is retried, and
+    NO_ENTITLEMENT only becomes conclusive after two sightings.
+    """
+    rec = get_record(metadata_id, cookie=cookie, token=token)
+    creds = "token" if token else ("cookie" if cookie else "none")
+
+    no_login_info = ftp_open(metadata_id)
+    no_login_open = bool(no_login_info and no_login_info.get("username"))
+
+    login_class, reason, ftp_info = "NONE", "未探测", None
+    no_ent_seen = 0
+    tries = 0
+    for i in range(max(1, attempts) if (cookie or token) else 0):
+        tries = i + 1
+        _st, pl = http_json(
+            BASE + "/file/ftp/getDownloadFtpUserByMetadataId?metadataId=" + urllib.parse.quote(metadata_id),
+            "POST", {}, cookie=cookie, token=token,
+        )
+        login_class, reason, ftp_info = classify_login_payload(pl)
+        if login_class in ("ENTITLED", "AUTH_INVALID"):
+            break
+        if login_class == "NO_ENTITLEMENT":
+            no_ent_seen += 1
+            if no_ent_seen >= 2:
+                break
+        time.sleep(1.5 * (i + 1))
+
+    if no_login_open:
+        state = "OPEN"
+    elif login_class == "ENTITLED":
+        state = "ENTITLED"
+    elif login_class == "NO_ENTITLEMENT":
+        state = "NO_ENTITLEMENT" if no_ent_seen >= 2 else "NO_ENTITLEMENT_ONCE"
+    elif login_class == "AUTH_INVALID":
+        state = "AUTH_INVALID"
+    elif creds == "none":
+        state = "NEEDS_AUTH"
+    else:
+        state = "UNKNOWN_TRANSIENT"
+
+    ftp_result, ftp_detail = None, "未执行"
+    if ftp_check:
+        info = no_login_info if no_login_open else ftp_info
+        if info and info.get("username"):
+            ftp_result, ftp_detail = probe_ftp(info, metadata_id)
+        else:
+            ftp_result, ftp_detail = "SKIPPED", "没有可用的 FTP 账户"
+
+    emoji, state_cn, advice = STATE_TEXT[state]
+    can_download = state in ("OPEN", "ENTITLED") and ftp_result in (None, "OK")
+    return {
+        "metadata_id": metadata_id,
+        "title": (rec or {}).get("title"),
+        "label": (rec or {}).get("sharePolicy") or "?",
+        "credentials": creds,
+        "no_login": "GRANTED" if no_login_open else "REFUSED",
+        "login_class": login_class,
+        "login_reason": reason,
+        "attempts": tries,
+        "ftp_info": ftp_info,
+        "ftp_check": {"result": ftp_result, "detail": ftp_detail} if ftp_check else None,
+        "state": state,
+        "state_cn": state_cn,
+        "advice": advice,
+        "can_download": can_download,
+    }
+
+
+def print_access_verdict(v):
+    print(f"数据集: {v.get('title') or v['metadata_id']}")
+    print(f"标签: {v['label']}   凭据: {v['credentials']}")
+    print(f"无登录探测: {v['no_login']}")
+    line = f"登录探测: {v['login_class']}"
+    if v["attempts"]:
+        line += f" ×{v['attempts']} 次"
+    if v["login_reason"]:
+        line += f"  「{v['login_reason']}」"
+    print(line)
+    if v.get("ftp_check"):
+        print(f"FTP 验证: {v['ftp_check']['result']}  {v['ftp_check']['detail']}")
+    emoji, _, _ = STATE_TEXT[v["state"]]
+    print(f"结论: {emoji} {v['state_cn']}  [{v['state']}]  可下载: {'是' if v['can_download'] else '否'}")
+    print(f"建议: {v['advice']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -757,7 +937,8 @@ def cmd_list(args):
 
 
 def cmd_info(args):
-    rec = get_record(args.metadata_id, cookie=args.cookie)
+    token = args.token or os.environ.get("TPDC_TOKEN")
+    rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     files = walk_files(args.metadata_id)
     if args.json:
         print(json.dumps({"record": rec, "files": files}, ensure_ascii=False, indent=2))
@@ -800,7 +981,8 @@ def cmd_files(args):
 
 
 def cmd_meta(args):
-    rec = get_record(args.metadata_id, cookie=args.cookie)
+    token = args.token or os.environ.get("TPDC_TOKEN")
+    rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     if not rec:
         print(
             "本地缓存和在线详情中都没有该数据集；请先运行 search，或对 B 类数据集提供 --cookie。",
@@ -841,7 +1023,21 @@ def cmd_download(args):
     workers = min(max(1, args.workers), FTP_WORKER_CAP)
     # Resolve access before walking the tree: B/C datasets should fail fast
     # instead of recursing through a potentially huge file tree.
-    info = get_ftp(args.metadata_id, cookie, token)
+    info = None
+    if (cookie or token) and not getattr(args, "no_probe", False):
+        verdict = probe_access(
+            args.metadata_id, cookie, token, attempts=getattr(args, "attempts", 3) or 3
+        )
+        if verdict["state"] in ("NO_ENTITLEMENT", "AUTH_INVALID"):
+            print_access_verdict(verdict)
+            return 2
+        vinfo = verdict.get("ftp_info")
+        if verdict["state"] == "ENTITLED" and vinfo and vinfo.get("username"):
+            info = dict(vinfo)
+            info["access"] = "B"
+        # OPEN / UNKNOWN_TRANSIENT / NO_ENTITLEMENT_ONCE: let get_ftp decide.
+    if info is None:
+        info = get_ftp(args.metadata_id, cookie, token)
 
     files = walk_files(args.metadata_id, use_cache=not args.no_cache)
 
@@ -945,8 +1141,27 @@ def cmd_verify(args):
     return 0 if (missing == 0 and bad == 0) else 1
 
 
+def cmd_status(args):
+    cookie = args.cookie or os.environ.get("TPDC_COOKIE")
+    token = args.token or os.environ.get("TPDC_TOKEN")
+    v = probe_access(
+        args.metadata_id,
+        cookie,
+        token,
+        attempts=max(1, args.attempts),
+        ftp_check=args.ftp_check,
+    )
+    if args.json:
+        printable = {k: val for k, val in v.items() if k != "ftp_info"}
+        print(json.dumps(printable, ensure_ascii=False, indent=2))
+        return 0 if v["can_download"] else 2
+    print_access_verdict(v)
+    return 0 if v["can_download"] else 2
+
+
 def cmd_cite(args):
-    rec = get_record(args.metadata_id, cookie=args.cookie)
+    token = args.token or os.environ.get("TPDC_TOKEN")
+    rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
     if not rec:
         print(
             "本地缓存和在线详情中都没有该数据集；请先运行 search，或提供 --cookie。",
@@ -1026,6 +1241,7 @@ def main():
     p = sub.add_parser("info", help="查看数据集与文件概览")
     p.add_argument("metadata_id")
     p.add_argument("--cookie", help="浏览器 Cookie（在线补齐元数据用）")
+    p.add_argument("--token", help="Bearer 令牌（B 类数据可用）")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_info)
 
@@ -1039,6 +1255,7 @@ def main():
     p = sub.add_parser("meta", help="打印数据集完整描述")
     p.add_argument("metadata_id")
     p.add_argument("--cookie", help="浏览器 Cookie（在线补齐元数据用）")
+    p.add_argument("--token", help="Bearer 令牌（B 类数据可用）")
     p.add_argument("--out", help="同时把描述写入指定目录的 DATASET_DESCRIPTION.md")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_meta)
@@ -1057,8 +1274,18 @@ def main():
     p.add_argument("--metadata-only", action="store_true", help="只写 DATASET_DESCRIPTION.md，不下载")
     p.add_argument("--sha256", action="store_true", help="下载后计算 SHA256")
     p.add_argument("--no-cache", action="store_true", help="忽略 1 小时文件树缓存")
+    p.add_argument("--no-probe", action="store_true", help="跳过下载前的权限预检")
     p.add_argument("--no-progress", action="store_true")
     p.set_defaults(func=cmd_download)
+
+    p = sub.add_parser("status", help="探测当前账号对该数据集的实际下载权限")
+    p.add_argument("metadata_id")
+    p.add_argument("--cookie", help="浏览器 Cookie")
+    p.add_argument("--token", help="Bearer 令牌（取自登录后的 access_token）")
+    p.add_argument("--attempts", type=int, default=3, help="登录探测次数；瞬时错误会退避重试")
+    p.add_argument("--ftp-check", action="store_true", help="再登录 FTP 并 SIZE 首个文件做最终验证")
+    p.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("verify", help="对照 manifest.json 校验已下载的文件")
     p.add_argument("dir", help="下载目录（含 manifest.json）")
@@ -1068,6 +1295,7 @@ def main():
     p = sub.add_parser("cite", help="生成引用")
     p.add_argument("metadata_id")
     p.add_argument("--cookie", help="浏览器 Cookie（在线补齐元数据用）")
+    p.add_argument("--token", help="Bearer 令牌（B 类数据可用）")
     p.add_argument("--format", choices=["bibtex", "ris", "gb", "text"], default="bibtex")
     p.set_defaults(func=cmd_cite)
 
