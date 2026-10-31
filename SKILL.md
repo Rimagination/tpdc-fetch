@@ -13,6 +13,8 @@ The script uses only the Python standard library (Python 3.8+). It talks to the 
 
 v0.2.0 additions: `list` / `verify` commands, GB/T 7714 citations, online metadata fallback (`--cookie` on `meta`/`info`/`cite`), search sorting and totals, file-tree caching, filename-aware `--include/--exclude`, 530 credential auto-refresh, UTF-8 safe output on Windows.
 
+v0.2.1: Bearer token auth (`--token` / `TPDC_TOKEN`) for policy-B datasets, and access errors now surface the server's reason. `未查询到对应FTP账户` means the account is logged in but has no entitlement — the dataset needs a separate application; retrying or changing credentials will not help.
+
 ## Access model
 
 TPDC datasets carry a `sharePolicy`:

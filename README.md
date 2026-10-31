@@ -74,6 +74,8 @@ python scripts/tpdc.py download <metadataId> --out ./data
 | **B** | 需要登录 | 用浏览器 Cookie：`--cookie` 或 `TPDC_COOKIE`；Cookie 是 httpOnly 时改用 Bearer 令牌：`--token` 或 `TPDC_TOKEN` |
 | **C** | 需要申请 | 只给页面链接，不绕过申请 |
 
+标签不等于实际权限：有的 B 类数据集登录后仍会返回「未查询到对应 FTP 账户」——那说明还需要单独申请，登录本身不够；也有的 C 类数据集对已授权账号可以直接下。以接口实际返回为准，工具会把服务端原因原样报出来。
+
 ## 常见问题
 
 **为什么慢？** TPDC 白天限速，单连接约 100 KB/s，4 路约 0.4 MB/s；02:00–10:00 更快。

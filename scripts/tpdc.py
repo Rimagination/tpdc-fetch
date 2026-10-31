@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ftplib import FTP, error_perm, error_temp
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 BASE = "https://data.tpdc.ac.cn"
 UA = f"tpdc-fetch/{__version__} (+https://data.tpdc.ac.cn)"
@@ -328,13 +328,23 @@ def ftp_open(metadata_id):
 
 
 def ftp_login(metadata_id, cookie, token=None):
+    """Return (ftp_info, reason). reason explains a refusal from the server."""
     if not cookie and not token:
-        return None
+        return None, "未提供凭据"
     url = BASE + "/file/ftp/getDownloadFtpUserByMetadataId?metadataId=" + urllib.parse.quote(metadata_id)
     status, payload = http_json(url, "POST", {}, cookie=cookie, token=token)
-    if status == 200 and isinstance(payload, dict) and payload.get("code") == "200":
-        return parse_ftp(payload.get("data") or {})
-    return None
+    if status == 200 and isinstance(payload, dict) and str(payload.get("code")) == "200":
+        return parse_ftp(payload.get("data") or {}), ""
+    reason = ""
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, str) and data.strip():
+            reason = data.strip()
+        else:
+            reason = payload.get("message") or ""
+    elif payload:
+        reason = str(payload)[:200]
+    return None, reason or f"HTTP {status}"
 
 
 def get_ftp(metadata_id, cookie=None, token=None):
@@ -342,16 +352,28 @@ def get_ftp(metadata_id, cookie=None, token=None):
     if info and info.get("username"):
         info["access"] = "A"
         return info
-    info = ftp_login(metadata_id, cookie, token)
+    info, reason = ftp_login(metadata_id, cookie, token)
     if info and info.get("username"):
         info["access"] = "B"
         return info
+    hint = ""
+    if not cookie and not token:
+        hint = (
+            "  登录后把浏览器 Cookie 传给 --cookie（或设置 TPDC_COOKIE）；\n"
+            "  也可以传 Bearer 令牌：--token（或设置 TPDC_TOKEN），取自登录后\n"
+            "  浏览器 DevTools → Application → Local Storage → access_token。\n"
+        )
+    elif reason and "未查询到" in reason:
+        hint = (
+            "  已登录，但服务端未为该账号生成 FTP 账户：说明这个数据集需要\n"
+            "  先在网站上单独申请/获得授权，登录本身不够。\n"
+        )
     raise RuntimeError(
-        "该数据集不是开放数据，需要登录/申请。\n"
+        "该数据集不是开放数据，或当前账号没有下载权限。\n"
+        f"  服务端返回: {reason or '无'}\n"
         f"  页面: {BASE}/zh-hans/data/{metadata_id}\n"
-        "  登录后把浏览器 Cookie 传给 --cookie（或设置 TPDC_COOKIE），再重试；\n"
-        "  也可以传 Bearer 令牌：--token（或设置 TPDC_TOKEN），取自登录后\n"
-        "  浏览器 DevTools → Application → Local Storage → access_token。"
+        f"{hint}"
+        "  可用 `files <id>` 确认文件清单，用 `meta <id>` 读数据说明。"
     )
 
 
