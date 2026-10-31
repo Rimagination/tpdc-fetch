@@ -40,6 +40,14 @@ TPDC Fetch 是一个**可用于任意 AI Agent 的 Skill**——Claude Code、Co
 
 > 使用tpdc-fetch下载中国1:200万沙漠分布图（1974）
 
+**显示进度条：**
+
+> 显示tpdc-fetch下载任务实时面板
+
+终端会实时显示百分比、速度与剩余时间（加 `--no-progress` 可关闭）。多文件、大数据集还可以让 Agent 起一个本地实时面板，直接读取下载目录里的 `.segNNN` 分段——分段进度、已传文件数、当前写入速度一目了然：
+
+![tpdc-fetch 下载任务实时面板](./assets/progress-panel.webp)
+
 也可以直接用命令行（Python 3.8+，无第三方依赖）：
 
 ```bash
