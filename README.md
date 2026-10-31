@@ -5,14 +5,16 @@
   <img alt="Python" src="https://img.shields.io/badge/python-3.8%2B-0EA5E9?style=flat-square" />
   <img alt="Unofficial" src="https://img.shields.io/badge/unofficial-community%20tool-64748B?style=flat-square" />
 
-  不用登录也能下开放数据；要登录的，把浏览器 Cookie 交给它。
+  用自然语言获取 TPDC 科学数据的 AI Agent Skill。
 
   [这是什么](#这是什么) · [能做什么](#能做什么) · [开始使用](#开始使用) · [常见问题](#常见问题) · [使用边界](#使用边界)
 </div>
 
 ## 这是什么
 
-TPDC Fetch 用来检索和下载[国家青藏高原科学数据中心](https://data.tpdc.ac.cn)的数据集。你给名称或 ID，它负责查元数据、判断访问级别、下载、续传、写说明和引用。**你不需要记 FTP 地址、端口、账号。** 适合需要批量下 TPDC 数据、又不想在网页和 FTP 客户端之间来回切的人。
+TPDC Fetch 是一个**可用于任意 AI Agent 的 Skill**——Claude Code、Codex、Cursor、ZCode 等都能直接调用。你用自然语言说一句需求，它就会检索、筛选、查阅、下载 TPDC（[国家青藏高原科学数据中心](https://data.tpdc.ac.cn)）的数据集，并写好数据说明、manifest 和引用。
+
+**你不需要知道数据集 ID，也不需要记 FTP 地址、端口和账号。**
 
 ## 能做什么
 
