@@ -12,7 +12,7 @@
 
 ## 这是什么
 
-TPDC Fetch 是一个**可用于任意 AI Agent 的 Skill**——Claude Code、Codex、Cursor、ZCode 等都能直接调用。你用自然语言说一句需求，它就会检索、筛选、查阅、下载 TPDC（[国家青藏高原科学数据中心](https://data.tpdc.ac.cn)）的数据集，并写好数据说明、manifest 和引用。
+TPDC Fetch 是一个面向[国家青藏高原科学数据中心](https://data.tpdc.ac.cn)（TPDC）的 Skill：检索、筛选、查阅、下载数据集，一句话就能跑完，Claude Code、Codex、Cursor、ZCode、Qoder、WorkBuddy 等支持 Skill 的 AI Agent 均可直接调用。
 
 **你不需要知道数据集 ID，也不需要记 FTP 地址、端口和账号。**
 
