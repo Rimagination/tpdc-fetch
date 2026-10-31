@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/banner.png" alt="tpdc-fetch" width="100%" />
+  <img src="./assets/banner.webp" alt="tpdc-fetch" width="100%" />
 
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-0EA5E9?style=flat-square" /></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.8%2B-0EA5E9?style=flat-square" />
