@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from ftplib import FTP, error_perm, error_temp
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 BASE = "https://data.tpdc.ac.cn"
 UA = f"tpdc-fetch/{__version__} (+https://data.tpdc.ac.cn)"
@@ -1004,6 +1004,33 @@ def cmd_meta(args):
     print(rec.get("description") or "（该数据集没有提供描述字段）")
 
 
+# --------------------------------------------------------------------------- #
+# Download progress state (file names and sizes only — no credentials)
+# --------------------------------------------------------------------------- #
+STATE_FILE = ".tpdc_progress.json"
+
+
+def write_progress_state(out_dir, title, files, status="下载中"):
+    """Write panel state next to the download. Contains no credentials."""
+    try:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        payload = {
+            "tool": f"tpdc-fetch {__version__}",
+            "title": title,
+            "total": sum(f["size"] for f in files),
+            "files_total": len(files),
+            "status": status,
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        if len(files) <= 2000:
+            payload["files"] = [[f["relpath"], f["size"]] for f in files]
+        (Path(out_dir) / STATE_FILE).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 def cmd_download(args):
     token = getattr(args, "token", None) or os.environ.get("TPDC_TOKEN")
     rec = get_record(args.metadata_id, cookie=args.cookie, token=token)
@@ -1066,6 +1093,17 @@ def cmd_download(args):
             print(f"  {human(f['size']):>10}  {f['relpath']}")
         return 0
 
+    write_progress_state(out, rec.get("title") or args.metadata_id, files)
+    panel_url = None
+    if getattr(args, "panel", False):
+        try:
+            from progress_panel import serve as panel_serve
+
+            _server, panel_url = panel_serve(out, getattr(args, "panel_port", 8765))
+            print(f"面板: {panel_url}  （随 download 进程存活）", file=sys.stderr)
+        except Exception as exc:
+            print(f"面板启动失败: {exc}", file=sys.stderr)
+
     def refresh():
         return get_ftp(args.metadata_id, cookie, token)
 
@@ -1080,6 +1118,7 @@ def cmd_download(args):
         sock_timeout=args.sock_timeout,
         refresh=refresh,
     )
+    write_progress_state(out, rec.get("title") or args.metadata_id, files, status="已完成")
 
     manifest = {
         "tool": f"tpdc-fetch {__version__}",
@@ -1276,6 +1315,12 @@ def main():
     p.add_argument("--no-cache", action="store_true", help="忽略 1 小时文件树缓存")
     p.add_argument("--no-probe", action="store_true", help="跳过下载前的权限预检")
     p.add_argument("--no-progress", action="store_true")
+    p.add_argument("--panel", action="store_true", help="启动本机实时面板（仅绑定 127.0.0.1）")
+    p.add_argument("--panel-port", type=int, default=8765)
+    p.add_argument(
+        "--token-file", help="从文件读取 Bearer 令牌（避免令牌进入 shell 历史）"
+    )
+    p.add_argument("--cookie-file", help="从文件读取 Cookie")
     p.set_defaults(func=cmd_download)
 
     p = sub.add_parser("status", help="探测当前账号对该数据集的实际下载权限")
@@ -1285,6 +1330,10 @@ def main():
     p.add_argument("--attempts", type=int, default=3, help="登录探测次数；瞬时错误会退避重试")
     p.add_argument("--ftp-check", action="store_true", help="再登录 FTP 并 SIZE 首个文件做最终验证")
     p.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    p.add_argument(
+        "--token-file", help="从文件读取 Bearer 令牌（避免令牌进入 shell 历史）"
+    )
+    p.add_argument("--cookie-file", help="从文件读取 Cookie")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("verify", help="对照 manifest.json 校验已下载的文件")
@@ -1300,6 +1349,16 @@ def main():
     p.set_defaults(func=cmd_cite)
 
     args = ap.parse_args()
+    # Credential files keep secrets out of argv and shell history; values are
+    # only held in memory for this process and never written anywhere.
+    try:
+        if getattr(args, "token_file", None):
+            args.token = Path(args.token_file).read_text(encoding="utf-8").strip()
+        if getattr(args, "cookie_file", None):
+            args.cookie = Path(args.cookie_file).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        print(f"ERROR: 读取凭据文件失败: {exc}", file=sys.stderr)
+        return 2
     try:
         return args.func(args) or 0
     except KeyboardInterrupt:

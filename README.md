@@ -47,7 +47,7 @@ TPDC Fetch 是一个面向[国家青藏高原科学数据中心](https://data.tp
 
 > 显示tpdc-fetch下载任务实时面板
 
-终端会实时显示百分比、速度与剩余时间（加 `--no-progress` 可关闭）。多文件、大数据集还可以让 Agent 起一个本地实时面板，直接读取下载目录里的 `.segNNN` 分段——分段进度、已传文件数、当前写入速度一目了然：
+加 `--panel` 会起一块本机实时面板（只绑定 127.0.0.1），分段进度、已传文件数、写入速度一目了然；终端进度条照常（`--no-progress` 可关闭）。已经在跑的下载也能单独监视：`python scripts/progress_panel.py --dir ./data`：
 
 <a href="./assets/progress-panel.webp"><img src="./assets/progress-panel-thumb.webp" width="480" alt="tpdc-fetch 下载任务实时面板"></a>
 
@@ -89,7 +89,7 @@ python scripts/tpdc.py download <metadataId> --out ./data
 
 ## 使用边界
 
-非官方工具，与 TPDC 无隶属关系；用的是网页内部接口，可能随时变更；不绕过登录/申请，不存储账号或 Cookie。数据版权与引用以 TPDC 页面为准。
+非官方工具，与 TPDC 无隶属关系；用的是网页内部接口，可能随时变更；不绕过登录/申请。凭据（Cookie / 令牌）只在进程内存里使用，不落盘、不进日志，`--token-file` / `--cookie-file` 可避免进入 shell 历史；实时面板只绑定 127.0.0.1，不提供文件内容。数据版权与引用以 TPDC 页面为准。
 
 ## 许可证
 

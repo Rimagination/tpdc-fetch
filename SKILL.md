@@ -15,6 +15,10 @@ v0.2.0 additions: `list` / `verify` commands, GB/T 7714 citations, online metada
 
 v0.2.1: Bearer token auth (`--token` / `TPDC_TOKEN`) for policy-B datasets, and access errors now surface the server's reason. `未查询到对应FTP账户` means the account is logged in but has no entitlement — the dataset needs a separate application; retrying or changing credentials will not help.
 
+v0.4.0: `download --panel` local live dashboard (127.0.0.1 only) plus a standalone
+watcher (`scripts/progress_panel.py`); `--token-file` / `--cookie-file` keep
+secrets out of shell history; credentials are never written to disk.
+
 v0.3.0: `status <id>` probe — three-stage check (no-login FTP → login FTP → optional FTP `SIZE`) that resolves what the current account can actually download. `download` runs the same probe first and refuses early on conclusive denials.
 
 ## Decide before you download
@@ -123,6 +127,33 @@ python scripts/tpdc.py download <metadataId> --out ./data
 ```
 
 If the API returns `用户未登录`, the cookie/token expired; copy a fresh one. The skill does not persist credentials.
+
+## Live progress panel
+
+`download` writes `.tpdc_progress.json` (dataset title, total bytes, file
+names/sizes — no credentials) next to the download and can serve a local
+dashboard:
+
+```bash
+python scripts/tpdc.py download <id> --out ./data --panel              # http://127.0.0.1:8765
+python scripts/tpdc.py download <id> --out ./data --panel --panel-port 8800
+python scripts/progress_panel.py --dir ./data                          # watch a running download
+python scripts/progress_panel.py --dir ./data --json                   # one snapshot, for scripts
+```
+
+The server binds to 127.0.0.1 only and serves the dashboard plus a
+`/progress` snapshot; it never serves file contents. The panel lives as
+long as the download process.
+
+## Credentials and privacy
+
+* `--cookie` / `--token` (and `TPDC_COOKIE` / `TPDC_TOKEN`) are held in
+  memory for the process only — never written to disk, logs, manifest.json
+  or the panel.
+* Prefer `--token-file` / `--cookie-file` so secrets stay out of shell
+  history; values are read once and kept in memory.
+* `.tpdc_progress.json` contains dataset title, file names and sizes only.
+* The panel binds to 127.0.0.1; nothing is exposed to the network.
 
 ## Download options
 
